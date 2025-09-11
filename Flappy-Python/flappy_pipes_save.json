@@ -1,0 +1,8 @@
+{
+  "coins": 0,
+  "owned": [
+    "classic"
+  ],
+  "equipped": "classic",
+  "auto_default": true
+}
