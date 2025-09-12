@@ -1,6 +1,6 @@
 
 # Flappy Bird — NEAT v2 (entrainement infini, réseau costaud, rendu vectoriel)
-# Auteur: ChatGPT x Tom
+# Auteur: Tom
 # Dépendances: pygame, neat-python
 #   pip install pygame neat-python
 #
@@ -22,6 +22,7 @@ from typing import List
 
 try:
     import pygame
+    pygame.mixer.pre_init(44100, -16, 2, 512)  # faible latence
 except Exception:
     print("Pygame manquant. Installe-le avec: pip install pygame")
     raise
@@ -55,6 +56,12 @@ SKINS = [
 ]
 SKIN_IDX = 0
 
+#============= Texutes ==============
+BG_IMG = pygame.transform.scale(pygame.image.load("assets/bg.png").convert(), (WIDTH, HEIGHT))
+BIRD_IMG = pygame.image.load("assets/bird1.png").convert_alpha()
+MENU_BG_IMG = pygame.transform.scale(
+    pygame.image.load(os.path.join("assets", "bg1.png")).convert(),
+    (WIDTH, HEIGHT))
 # Physique / gameplay
 GRAVITY       = 0.5
 JUMP_VELOCITY = -8.5
@@ -82,6 +89,12 @@ class UISyncReporter(BaseReporter):
     def start_generation(self, generation):
         global gen
         gen = generation
+SND_FLAP  = pygame.mixer.Sound("sounds/se_go_ball_gotcha.wav")
+SND_POINT = pygame.mixer.Sound("sounds/SE164_001.wav")
+SND_HIT   = pygame.mixer.Sound("sounds/gameover.mp3")
+SND_DIE   = pygame.mixer.Sound("sounds/gameover.mp3")
+for s in (SND_FLAP, SND_POINT, SND_HIT, SND_DIE):
+    s.set_volume(0.35)
 
 # ============== Entités ==============
 class Bird:
@@ -90,11 +103,14 @@ class Bird:
         self.y = float(y)
         self.vel = 0.0
         self.radius = 16
+        self.sprite = pygame.transform.smoothscale(BIRD_IMG, (self.radius*2, self.radius*2))
         self.color = color
         self.tilt = 0.0
 
     def jump(self):
         self.vel = JUMP_VELOCITY
+        try: SND_FLAP.play()
+        except: pass
 
     def move(self):
         self.vel += GRAVITY
@@ -104,15 +120,14 @@ class Bird:
         self.tilt = 25 if dy < 0 else max(-90, self.tilt - 3.5)
 
     def draw(self, win):
-        pygame.draw.circle(win, self.color, (int(self.x), int(self.y)), self.radius)
-        wing_r = int(self.radius * 0.65)
-        pygame.draw.circle(win, (max(0,self.color[0]-40), max(0,self.color[1]-40), max(0,self.color[2]-40)),
-                           (int(self.x)-wing_r//2, int(self.y)), wing_r, width=3)
-        pygame.draw.polygon(win, (255,170,0), [
-            (int(self.x)+self.radius, int(self.y)-4),
-            (int(self.x)+self.radius+10, int(self.y)),
-            (int(self.x)+self.radius, int(self.y)+4)
-        ])
+        rot = pygame.transform.rotate(self.sprite, self.tilt)
+        rect = rot.get_rect(center=(int(self.x), int(self.y)))
+        win.blit(rot, rect.topleft)
+
+  
+
+
+
 
 class Pipe:
     def __init__(self, x: int, gap_center: int, gap_size: int, color=(90,200,90), rim=(50,130,60)):
@@ -156,7 +171,7 @@ class Base:
 # ============== Rendu ==============
 def draw_window(win, birds: List[Bird], pipes: List[Pipe], base: Base, score: int, gen_num: int, alive: int, skin_idx: int):
     bg, pipe_c, rim_c, bird_c, ui = SKINS[skin_idx]
-    win.fill(bg)
+    win.blit(BG_IMG, (0, 0))
     for p in pipes: p.draw(win)
     base.draw(win)
     score_surf = STAT_FONT.render(f"Score: {score}", True, ui)
@@ -170,7 +185,7 @@ def draw_window(win, birds: List[Bird], pipes: List[Pipe], base: Base, score: in
 
 def draw_menu(win, skin_idx: int):
     bg, _, _, _, ui = SKINS[skin_idx]
-    win.fill(bg)
+    win.blit(MENU_BG_IMG, (0, 0))
     title = BIG_FONT.render("FLAPPY BIRD — NEAT v2", True, ui)
     win.blit(title, title.get_rect(center=(WIDTH//2, HEIGHT//2 - 160)))
     m1 = STAT_FONT.render("[1] Entraîner l'IA (infini)", True, ui)
@@ -280,7 +295,13 @@ def eval_genomes(genomes, config):
                     if b.y - b.radius < p.top or b.y + b.radius > p.bottom:
                         ge[i].fitness -= 1.0
                         dead_idx.add(i)
-                if b.y + b.radius >= FLOOR_Y or b.y - b.radius <= 0:
+                if b.y + b.radius >= FLOOR_Y or b.y - b.radius <= 0:    
+                    if i not in dead_idx:  # évite de jouer 2x le même frame
+                        try:
+                            SND_HIT.play()
+                            SND_DIE.play()
+                        except:
+                            pass
                     ge[i].fitness -= 1.0
                     dead_idx.add(i)
 
@@ -292,8 +313,10 @@ def eval_genomes(genomes, config):
             if p.x + p.width < 0:
                 rem_pipes.append(p)
 
-        if add_pipe:
+        if add_pipe:    
             score += 1
+            try: SND_POINT.play()
+            except: pass
             for g in ge: g.fitness += 5.0
             # curriculum
             if score % 5 == 0:
