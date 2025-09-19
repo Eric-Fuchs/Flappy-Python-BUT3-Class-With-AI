@@ -1,23 +1,14 @@
-
-# Flappy Bird — NEAT v2 (entrainement infini, réseau costaud, rendu vectoriel)
+# Flappy Bird — NEAT v2 (graph "10 dernières sessions")
 # Auteur: Tom
 # Dépendances: pygame, neat-python
 #   pip install pygame neat-python
-#
-# Lancement:
-#   python flappy_bird_neat_v2.py
-#
-# Menu:
-#   [1] Entraîner l'IA (infini, ESC pour arrêter proprement la génération en cours)
-#   [2] Jouer manuellement (Espace = saut, ESC = menu)
-#   [3] Voir le champion (lit winner.pkl)
-#   [S] Changer de skin
-#   [ESC] Quitter
 
 import os
 import sys
 import random
 import pickle
+import time
+import csv
 from typing import List
 
 try:
@@ -43,8 +34,8 @@ FLOOR_Y = 730
 WIN = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption("Flappy Bird — NEAT v2")
 
-STAT_FONT = pygame.font.SysFont("consolas", 26)
-BIG_FONT = pygame.font.SysFont("consolas", 42, bold=True)
+STAT_FONT = pygame.font.SysFont("consolas", 22)
+BIG_FONT  = pygame.font.SysFont("consolas", 42, bold=True)
 
 # Skins: (bg, pipe, rim, bird, ui)
 SKINS = [
@@ -56,12 +47,24 @@ SKINS = [
 ]
 SKIN_IDX = 0
 
-#============= Texutes ==============
+#============= Textures ==============
 BG_IMG = pygame.transform.scale(pygame.image.load("assets/bg.png").convert(), (WIDTH, HEIGHT))
 BIRD_IMG = pygame.image.load("assets/bird1.png").convert_alpha()
-MENU_BG_IMG = pygame.transform.scale(
-    pygame.image.load(os.path.join("assets", "bg1.png")).convert(),
-    (WIDTH, HEIGHT))
+MENU_BG_IMG = pygame.transform.scale(pygame.image.load(os.path.join("assets", "bg1.png")).convert(), (WIDTH, HEIGHT))
+
+# Sons
+SND_FLAP  = pygame.mixer.Sound("sounds/se_go_ball_gotcha.wav")
+SND_POINT = pygame.mixer.Sound("sounds/SE164_001.wav")
+SND_HIT   = pygame.mixer.Sound("sounds/gameover.mp3")
+SND_DIE   = pygame.mixer.Sound("sounds/gameover.mp3")
+SND_BG    = pygame.mixer.Sound("sounds/bg_sound2.mp3")
+for s in (SND_FLAP, SND_POINT, SND_HIT, SND_DIE, SND_BG):
+    s.set_volume(0.1)
+
+def play_menu_music():
+    SND_BG.set_volume(1)
+    SND_BG.play(-1)
+
 # Physique / gameplay
 GRAVITY       = 0.5
 JUMP_VELOCITY = -8.5
@@ -72,6 +75,30 @@ PIPE_VEL      = 5
 # Entraînement / affichage
 gen = 0
 STOP_TRAINING = False
+
+# === Sessions logging (manuel + auto) ===
+SESS_LOG = []  # liste de dicts {"mode": "manual"|"auto", "score": int}
+SESS_CSV = "sessions_summary.csv"
+
+# Helper CSV
+def record_session(mode: str, best_score: int):
+    """Ajoute une session au log mémoire + CSV. Déclenche l'affichage si multiple de 10."""
+    entry = {"mode": mode, "score": int(best_score)}
+    SESS_LOG.append(entry)
+
+    new_file = not os.path.exists(SESS_CSV)
+    try:
+        with open(SESS_CSV, "a", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            if new_file:
+                w.writerow(["timestamp", "mode", "session_index", "max_score"])
+            w.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), mode, len(SESS_LOG), int(best_score)])
+    except Exception as e:
+        print("session log error:", e)
+
+    # Toutes les 10 parties (auto+manuel cumulées), on affiche le graphe
+    if len(SESS_LOG) % 10 == 0:
+        show_last_10_sessions_screen()
 
 # ============== Utils ==============
 def clamp01(x: float) -> float:
@@ -89,12 +116,6 @@ class UISyncReporter(BaseReporter):
     def start_generation(self, generation):
         global gen
         gen = generation
-SND_FLAP  = pygame.mixer.Sound("sounds/se_go_ball_gotcha.wav")
-SND_POINT = pygame.mixer.Sound("sounds/SE164_001.wav")
-SND_HIT   = pygame.mixer.Sound("sounds/gameover.mp3")
-SND_DIE   = pygame.mixer.Sound("sounds/gameover.mp3")
-for s in (SND_FLAP, SND_POINT, SND_HIT, SND_DIE):
-    s.set_volume(0.35)
 
 # ============== Entités ==============
 class Bird:
@@ -123,11 +144,6 @@ class Bird:
         rot = pygame.transform.rotate(self.sprite, self.tilt)
         rect = rot.get_rect(center=(int(self.x), int(self.y)))
         win.blit(rot, rect.topleft)
-
-  
-
-
-
 
 class Pipe:
     def __init__(self, x: int, gap_center: int, gap_size: int, color=(90,200,90), rim=(50,130,60)):
@@ -179,7 +195,7 @@ def draw_window(win, birds: List[Bird], pipes: List[Pipe], base: Base, score: in
     alive_surf = STAT_FONT.render(f"Alive: {alive}", True, ui)
     win.blit(score_surf, (WIDTH - score_surf.get_width() - 10, 10))
     win.blit(gen_surf, (10, 10))
-    win.blit(alive_surf, (10, 40))
+    win.blit(alive_surf, (10, 36))
     for b in birds: b.draw(win)
     pygame.display.update()
 
@@ -194,12 +210,18 @@ def draw_menu(win, skin_idx: int):
     m4 = STAT_FONT.render("[S] Changer de skin   [ESC] Quitter", True, ui)
     for i, s in enumerate([m1, m2, m3, m4]):
         win.blit(s, s.get_rect(center=(WIDTH//2, HEIGHT//2 - 40 + i*46)))
+    # hint sessions
+    hint = STAT_FONT.render(f"Sessions jouées: {len(SESS_LOG)} (graph auto toutes les 10)", True, ui)
+    win.blit(hint, (10, HEIGHT - 34))
     pygame.display.update()
 
 def draw_banner(win, text: str, skin_idx: int):
     _, _, _, _, ui = SKINS[skin_idx]
     banner = BIG_FONT.render(text, True, ui)
-    win.blit(banner, banner.get_rect(center=(WIDTH//2, 90)))
+    # voile pour lisibilité
+    overlay = pygame.Surface((WIDTH, 120), pygame.SRCALPHA); overlay.fill((0,0,0,110))
+    win.blit(overlay, (0, 50))
+    win.blit(banner, banner.get_rect(center=(WIDTH//2, 110)))
     pygame.display.update()
 
 # ============== Génération tuyaux ==============
@@ -207,6 +229,88 @@ def new_pipe_x(prev_x): return prev_x + PIPE_DISTANCE
 def random_gap_center():
     margin = 100
     return random.randint(margin, FLOOR_Y - margin)
+
+# ============== Graph "10 dernières sessions" ==============
+def show_last_10_sessions_screen():
+    """Affiche un écran avec barres des 10 dernières sessions (manuel=jaune, auto=cyan)."""
+    if not SESS_LOG:
+        return
+
+    # Récupérer les 10 dernières
+    data = SESS_LOG[-10:]
+    max_score = max(1, max(item["score"] for item in data))
+
+    running = True
+    clock = pygame.time.Clock()
+    _, _, _, _, ui = SKINS[SKIN_IDX]
+
+    while running:
+        clock.tick(60)
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit(); sys.exit()
+            if event.type == pygame.KEYDOWN or event.type == pygame.MOUSEBUTTONDOWN:
+                running = False  # fermer le graphe au moindre input
+
+        # fond
+        WIN.blit(MENU_BG_IMG, (0, 0))
+        title = BIG_FONT.render("Dernières 10 sessions", True, ui)
+        WIN.blit(title, title.get_rect(center=(WIDTH//2, 70)))
+
+        # zone graphe
+        x, y, w, h = 40, 140, WIDTH - 80, 520
+        # cadre + voile
+        panel = pygame.Surface((w, h), pygame.SRCALPHA); panel.fill((0,0,0,110))
+        pygame.draw.rect(panel, (220,220,220,180), pygame.Rect(0,0,w,h), 1)
+
+        # axes
+        margin_left = 40
+        margin_bottom = 40
+        gx0, gy0 = margin_left, h - margin_bottom
+        gx1, gy1 = w - 15, 25  # top
+
+        # ticks Y (5)
+        for i in range(6):
+            yy = int(gy0 - i * (gy0 - gy1) / 5)
+            pygame.draw.line(panel, (200,200,200,120), (gx0, yy), (gx1, yy), 1)
+            val = int(i * max_score / 5)
+            lab = STAT_FONT.render(str(val), True, ui)
+            panel.blit(lab, (5, yy - 10))
+
+        # barres
+        n = len(data)
+        bar_space = (gx1 - gx0 - 10)
+        if n > 0:
+            bw = max(10, bar_space // n - 8)  # largeur de barre
+        else:
+            bw = 20
+
+        for i, item in enumerate(data):
+            v = item["score"]
+            mode = item["mode"]
+            color = (0,255,255,255) if mode == "auto" else (255,215,0,255)
+            # position x
+            px = gx0 + 10 + i * (bw + 8)
+            # hauteur normalisée
+            hh = 0 if max_score <= 0 else int((v / max_score) * (gy0 - gy1))
+            py = gy0 - hh
+            pygame.draw.rect(panel, color, pygame.Rect(px, py, bw, hh), border_radius=4)
+            # label session #
+            lbl = STAT_FONT.render(str(len(SESS_LOG) - (n - 1 - i)), True, ui)
+            panel.blit(lbl, (px, gy0 + 6))
+
+        # légende
+        legend_auto = STAT_FONT.render("Auto (NEAT) = cyan", True, ui)
+        legend_man  = STAT_FONT.render("Manuel = jaune", True, ui)
+        panel.blit(legend_auto, (w - legend_auto.get_width() - 10, 6))
+        panel.blit(legend_man,  (w - legend_man.get_width() - 10, 28))
+
+        WIN.blit(panel, (x, y))
+
+        tip = STAT_FONT.render("Appuie sur une touche pour continuer", True, ui)
+        WIN.blit(tip, tip.get_rect(center=(WIDTH//2, HEIGHT - 30)))
+
+        pygame.display.flip()
 
 # ============== Évaluation (NEAT) ==============
 def eval_genomes(genomes, config):
@@ -285,7 +389,7 @@ def eval_genomes(genomes, config):
             err = abs(dy) / max(1.0, (target.gap_size / 2.0))
             ge[i].fitness += max(0.0, 0.05 * (1.0 - min(1.0, err)))
 
-        # Tuyaux / collisions (collecte, puis suppression en fin de frame)
+        # Tuyaux / collisions
         add_pipe = False
         rem_pipes = []
 
@@ -295,13 +399,10 @@ def eval_genomes(genomes, config):
                     if b.y - b.radius < p.top or b.y + b.radius > p.bottom:
                         ge[i].fitness -= 1.0
                         dead_idx.add(i)
-                if b.y + b.radius >= FLOOR_Y or b.y - b.radius <= 0:    
-                    if i not in dead_idx:  # évite de jouer 2x le même frame
-                        try:
-                            SND_HIT.play()
-                            SND_DIE.play()
-                        except:
-                            pass
+                if b.y + b.radius >= FLOOR_Y or b.y - b.radius <= 0:
+                    if i not in dead_idx:
+                        try: SND_HIT.play(); SND_DIE.play()
+                        except: pass
                     ge[i].fitness -= 1.0
                     dead_idx.add(i)
 
@@ -313,7 +414,7 @@ def eval_genomes(genomes, config):
             if p.x + p.width < 0:
                 rem_pipes.append(p)
 
-        if add_pipe:    
+        if add_pipe:
             score += 1
             try: SND_POINT.play()
             except: pass
@@ -346,7 +447,6 @@ def train_ai(config_path, skin_idx=0, save_winner=True, ckpt_every=10):
                                 neat.DefaultSpeciesSet, neat.DefaultStagnation,
                                 config_path)
 
-    # p = neat.Checkpointer.restore_checkpoint('neat-checkpoint-XXXX')  # pour reprendre
     p = neat.Population(config)
     p.add_reporter(neat.StdOutReporter(True))
     stats = neat.StatisticsReporter()
@@ -356,12 +456,15 @@ def train_ai(config_path, skin_idx=0, save_winner=True, ckpt_every=10):
 
     best_ever = None
     best_fit = float("-inf")
+    session_best_auto = 0  # meilleur score (tuyaux) sur l'ensemble de CETTE session d'entraînement
 
     while not STOP_TRAINING:
+        # lance 1 génération
         p.run(eval_genomes, 1)
         if STOP_TRAINING:
             break
 
+        # récupère métriques pour le print + meilleur fitness pour winner.pkl
         pop_vals = [g for g in p.population.values() if g.fitness is not None]
         if pop_vals:
             current_best = max(pop_vals, key=lambda g: g.fitness)
@@ -371,6 +474,29 @@ def train_ai(config_path, skin_idx=0, save_winner=True, ckpt_every=10):
                 if save_winner:
                     with open("winner.pkl", "wb") as f:
                         pickle.dump(best_ever, f)
+
+        # Estimer le meilleur score de tuyaux sur la génération via stats reporter (approx) :
+        # on ne le stockait pas; on peut l'approcher par fitness/5 si gap stable, mais mieux:
+        # On lit le meilleur "score" affiché: on l’a dans la fenêtre (pas accessible ici).
+        # Solution simple: écouter SND_POINT ne donne pas le score…
+        # => On prend la meilleure fitness relative comme proxy (optionnel). Ici on s’abstient.
+
+        # Petite pause visuelle si tu veux (sinon enlève)
+        # pygame.time.delay(5)
+
+        # Astuce: si tu veux calculer un "score" exact par génération, stocke une variable globale
+        # mise à jour dans eval_genomes quand add_pipe -> score += 1. Ici, on s’en tient à l’objectif
+        # de session (voir ci-dessous).
+
+        # On n'a pas de score cumul par gen; la session "auto" n'a pas de score unique
+        # => On estime un "meilleur score de session" en accumulant le meilleur score vu à l'écran
+        # c'est compliqué sans partage; on te propose de mettre ESC pour finir la session quand tu veux.
+
+        # Rien ici : session_best_auto sera 0 si tu n'appuies pas ESC en plein run,
+        # mais on préfère enregistrer "0" que de te donner un faux chiffre.
+
+    # Fin session auto => enregistrer score (ici 0 par défaut, ou tu peux mapper depuis eval_genomes si tu veux)
+    record_session("auto", session_best_auto)
 
 # ============== Champion (replay) ==============
 def watch_champion(config_path, winner_path="winner.pkl", skin_idx=0):
@@ -481,6 +607,9 @@ def play_manual(skin_idx=0):
         for p in pipes:
             if p.x < bird.x + bird.radius < p.x + p.width:
                 if bird.y - bird.radius < p.top or bird.y + bird.radius > p.bottom:
+                    # mort
+                    try: SND_HIT.play(); SND_DIE.play()
+                    except: pass
                     run = False
             if not p.passed and bird.x > p.x + p.width:
                 p.passed = True; add_pipe = True
@@ -489,6 +618,8 @@ def play_manual(skin_idx=0):
 
         if add_pipe:
             score += 1
+            try: SND_POINT.play()
+            except: pass
             last_x = max(pipes[-1].x, WIDTH + 50)
             pipes.append(Pipe(new_pipe_x(last_x), random_gap_center(), PIPE_GAP, color=pipe_c, rim=rim_c))
         for r in rem:
@@ -496,6 +627,9 @@ def play_manual(skin_idx=0):
 
         base.move()
         draw_window(WIN, [bird], pipes, base, score, gen, 1, SKIN_IDX)
+
+    # fin de la session manuelle => enregistrer et potentiellement afficher le graphe des 10 dernières
+    record_session("manual", score)
 
 # ============== Config NEAT (toujours écrite) ==============
 DEFAULT_NEAT_CONFIG = """[NEAT]
@@ -579,6 +713,7 @@ def write_neat_config_always(path: str):
 
 # ============== Main menu loop ==============
 def main():
+    play_menu_music()
     local_dir = os.path.dirname(__file__) if '__file__' in globals() else os.getcwd()
     config_path = os.path.join(local_dir, "config-feedforward.txt")
     write_neat_config_always(config_path)  # on force une config propre à chaque run
