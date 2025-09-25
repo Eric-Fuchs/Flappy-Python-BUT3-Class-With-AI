@@ -67,7 +67,7 @@ BG_FILES = [
     "assets/bg.png",
     "assets/bg1.png",
     "assets/bg2.png",
-    "assets/bg_desert.png",
+    "assets/bg3.png",
 ]
 BG_IMGS = [img for p in BG_FILES if (img := _safe_load_bg(p)) is not None]
 if not BG_IMGS:
