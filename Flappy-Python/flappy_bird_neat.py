@@ -1,4 +1,4 @@
-# Flappy Bird — NEAT v2 (divers pipes, timer spacing, graph bouton + G, popup Matplotlib)
+# Flappy Bird — NEAT v2 (textures base+pipes, anti-stack 2–3, boutons, skins, graph matplotlib)
 # Auteur: Tom
 # Dépendances: pygame, neat-python, matplotlib
 #   pip install pygame neat-python matplotlib
@@ -26,7 +26,7 @@ except Exception:
     print("Le paquet 'neat-python' est manquant. Installe-le avec: pip install neat-python")
     raise
 
-# Matplotlib (popup graphe) — on tente ici; si non dispo, le process fera un 2e essai
+# Matplotlib (popup graphe)
 try:
     import matplotlib.pyplot as plt
 except Exception:
@@ -38,14 +38,14 @@ pygame.init()
 pygame.font.init()
 
 WIDTH, HEIGHT = 500, 800
-FLOOR_Y = 730
+FLOOR_Y = 730  # haut de la base
 WIN = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption("Flappy Bird — NEAT v2")
 
 STAT_FONT = pygame.font.SysFont("consolas", 22)
 BIG_FONT  = pygame.font.SysFont("consolas", 42, bold=True)
 
-# Skins: (bg, pipe, rim, bird, ui)
+# Skins: (bg, pipe, rim, bird, ui)  (couleurs UI ; les tuyaux sont texturés PNG)
 SKINS = [
     ((30,30,45),  (90,200,90),  (50,130,60),  (240,220,70),  (235,235,235)),  # classic
     ((14,14,24),  (60,130,220), (36,80,150),  (250,250,255), (230,240,255)),  # nocturne
@@ -55,12 +55,55 @@ SKINS = [
 ]
 SKIN_IDX = 0
 
-#============= Textures (assure les fichiers en assets/) ==============
-BG_IMG = pygame.transform.scale(pygame.image.load("assets/bg.png").convert(), (WIDTH, HEIGHT))
-BIRD_IMG = pygame.image.load("assets/bird1.png").convert_alpha()
-MENU_BG_IMG = pygame.transform.scale(pygame.image.load(os.path.join("assets", "bg1.png")).convert(), (WIDTH, HEIGHT))
+#============= Backgrounds multiples ==============
+def _safe_load_bg(path):
+    try:
+        img = pygame.image.load(path).convert()
+        return pygame.transform.scale(img, (WIDTH, HEIGHT))
+    except Exception:
+        return None
 
-# Sons (assure les fichiers en sounds/)
+BG_FILES = [
+    "assets/bg.png",
+    "assets/bg1.png",
+    "assets/bg2.png",
+    "assets/bg_desert.png",
+]
+BG_IMGS = [img for p in BG_FILES if (img := _safe_load_bg(p)) is not None]
+if not BG_IMGS:
+    surf = pygame.Surface((WIDTH, HEIGHT)); surf.fill((30,30,45)); BG_IMGS = [surf]
+BG_IDX = 0
+BG_IMG = BG_IMGS[BG_IDX]
+MENU_BG_IMG = BG_IMGS[BG_IDX]
+
+def apply_background(idx):
+    global BG_IDX, BG_IMG, MENU_BG_IMG
+    BG_IDX = idx % len(BG_IMGS)
+    BG_IMG = BG_IMGS[BG_IDX]
+    MENU_BG_IMG = BG_IMGS[BG_IDX]
+
+def cycle_background(step=1):
+    apply_background(BG_IDX + step)
+
+#============= Textures sprites ==============
+# Oiseau
+BIRD_IMG = pygame.image.load("assets/bird1.png").convert_alpha()
+
+# Tuyaux (PNG) — on scale à une largeur cible pour cohérence avec le gameplay
+PIPE_RAW = pygame.image.load("assets/pipe-green.png").convert_alpha()
+PIPE_TARGET_W = 80  # largeur cohérente avec ton ancienne valeur
+pipe_scale = PIPE_TARGET_W / PIPE_RAW.get_width()
+PIPE_BOTTOM_IMG = pygame.transform.smoothscale(
+    PIPE_RAW, (PIPE_TARGET_W, int(PIPE_RAW.get_height() * pipe_scale))
+)
+PIPE_TOP_IMG = pygame.transform.flip(PIPE_BOTTOM_IMG, False, True)
+
+# Base (PNG) — on scale à la largeur de l'écran et à la hauteur exacte de la base
+BASE_RAW = pygame.image.load("assets/base.png").convert_alpha()
+BASE_H = max(1, HEIGHT - FLOOR_Y)
+BASE_IMG = pygame.transform.smoothscale(BASE_RAW, (WIDTH, BASE_H))
+
+# Sons
 SND_FLAP  = pygame.mixer.Sound("sounds/se_go_ball_gotcha.wav")
 SND_POINT = pygame.mixer.Sound("sounds/sfx_point.mp3")
 SND_HIT   = pygame.mixer.Sound("sounds/are_you_serious.mp3")
@@ -73,52 +116,82 @@ def play_menu_music():
     SND_BG.set_volume(0.25)
     SND_BG.play(-1)
 
-# ===== Gameplay (timer spacing + gap variable safe) =====
+# ===== Gameplay (timer spacing + anti-stack) =====
 FPS               = 60
 GRAVITY           = 0.5
 JUMP_VELOCITY     = -8.5
 PIPE_VEL          = 5
 
-TIME_BETWEEN_PIPES= 0.78    # s entre colonnes (0.72–0.85 = serré)
-SPAWN_OFFSET_X    = 70      # spawn juste hors-écran
+TIME_BETWEEN_PIPES= 0.78  # cadence (~0.72–0.85)
+SPAWN_OFFSET_X    = 70    # spawn juste hors-écran
+MIN_PIPE_SPACING_PX = 220 # anti-stack: distance min entre colonnes successives (≈ Flappy)
 
-# Base gap (point de départ)
+# Base gap par défaut (sera varié)
 PIPE_GAP          = 180
 
 # Entraînement / affichage
 gen = 0
 STOP_TRAINING = False
 
-# === Sessions logging (manuel + auto) ===
-SESS_LOG = []  # {"mode": "manual"|"auto", "score": int}
+# Sessions
+SESS_LOG = []            # {"mode": "manual"|"auto", "score": int}
 SESS_CSV = "sessions_summary.csv"
-SESSION_AUTO_BEST_SCORE = 0  # meilleur score observé pendant 1 session auto
+SESSION_AUTO_BEST_SCORE = 0
 
-# === Bouton Graph (UI) ===
-BTN_W, BTN_H = 118, 32
-GRAPH_BTN_RECT = pygame.Rect(WIDTH - BTN_W - 10, 8, BTN_W, BTN_H)  # coin haut droit
+#============= UI: Boutons esthétiques ==============
+def draw_pill(surface, rect, bg=(0,0,0,130), border=(255,255,255), border_w=1, radius=14, shadow=True):
+    if shadow:
+        sh = pygame.Surface((rect.width+10, rect.height+10), pygame.SRCALPHA)
+        pygame.draw.ellipse(sh, (0,0,0,90), sh.get_rect())
+        surface.blit(sh, (rect.x-5, rect.y-5))
+    pill = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+    pygame.draw.rect(pill, bg, pygame.Rect(0,0,rect.width,rect.height), border_radius=radius)
+    pygame.draw.rect(pill, border, pygame.Rect(0,0,rect.width,rect.height), width=border_w, border_radius=radius)
+    surface.blit(pill, rect.topleft)
 
+def draw_button(surface, rect, text, ui_color, hover=False):
+    base_alpha = 130 if not hover else 190
+    bg_col = (20, 20, 30, base_alpha)
+    draw_pill(surface, rect, bg=bg_col, border=ui_color, border_w=1, radius=16, shadow=True)
+    label = STAT_FONT.render(text, True, ui_color)
+    lx = rect.x + (rect.w - label.get_width()) // 2
+    ly = rect.y + (rect.h - label.get_height()) // 2
+    surface.blit(label, (lx, ly))
+
+def get_menu_button_rects():
+    W, H = 260, 48
+    gap = 14
+    cx, start_y = WIDTH//2 - W//2, HEIGHT//2 - (H*6 + gap*5)//2 + 20
+    names = ["train", "play", "champ", "skin", "bg", "quit"]
+    rects = {}
+    for i, name in enumerate(names):
+        rects[name] = pygame.Rect(cx, start_y + i*(H+gap), W, H)
+    return rects
+
+# === Bouton Graph (relooké) ===
+BTN_W, BTN_H = 150, 36
+GRAPH_BTN_RECT = pygame.Rect(WIDTH - BTN_W - 12, 10, BTN_W, BTN_H)
+
+def is_graph_button(pos): return GRAPH_BTN_RECT.collidepoint(pos)
 def draw_graph_button(surface, ui_color):
-    # fond semi-transparent
-    bg = pygame.Surface((GRAPH_BTN_RECT.width, GRAPH_BTN_RECT.height), pygame.SRCALPHA)
-    bg.fill((0,0,0,120))
-    surface.blit(bg, GRAPH_BTN_RECT.topleft)
-    pygame.draw.rect(surface, ui_color, GRAPH_BTN_RECT, width=1, border_radius=8)
-    label = STAT_FONT.render("📈 Graph (G)", True, ui_color)
-    surface.blit(label, (GRAPH_BTN_RECT.x + 8, GRAPH_BTN_RECT.y + 4))
+    hover = GRAPH_BTN_RECT.collidepoint(pygame.mouse.get_pos())
+    draw_button(surface, GRAPH_BTN_RECT, "📈 Graph (G)", ui_color, hover=hover)
 
-def is_graph_button(pos):
-    return GRAPH_BTN_RECT.collidepoint(pos)
+def draw_centered_score(surface, score, ui_color):
+    txt = BIG_FONT.render(f"{score}", True, ui_color)
+    pad_x, pad_y = 24, 8
+    W_, H_ = txt.get_width() + pad_x*2, txt.get_height() + pad_y*2
+    rect = pygame.Rect((WIDTH - W_)//2, 14, W_, H_)
+    draw_pill(surface, rect, bg=(0,0,0,140), border=ui_color, border_w=1, radius=18, shadow=True)
+    surface.blit(txt, (rect.x + pad_x, rect.y + pad_y))
 
 def handle_graph_request():
     show_last_10_sessions_matplotlib()
 
-# Helper CSV
+# CSV sessions
 def record_session(mode: str, best_score: int):
-    """Ajoute une session au log + CSV. Toutes les 10: popup matplotlib."""
     entry = {"mode": mode, "score": int(best_score)}
     SESS_LOG.append(entry)
-
     new_file = not os.path.exists(SESS_CSV)
     try:
         with open(SESS_CSV, "a", newline="", encoding="utf-8") as f:
@@ -128,9 +201,8 @@ def record_session(mode: str, best_score: int):
             w.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), mode, len(SESS_LOG), int(best_score)])
     except Exception as e:
         print("session log error:", e)
-
     if len(SESS_LOG) % 10 == 0:
-        show_last_10_sessions_matplotlib()  # popup externe (process)
+        show_last_10_sessions_matplotlib()
 
 # ============== Utils ==============
 def clamp01(x: float) -> float:
@@ -176,17 +248,21 @@ class Bird:
         win.blit(rot, rect.topleft)
 
 class Pipe:
-    def __init__(self, x: int, gap_center: int, gap_size: int, color=(90,200,90), rim=(50,130,60)):
+    """Tuyaux avec sprites PNG (haut retourné + bas). Collision logique via gap top/bottom."""
+    def __init__(self, x: int, gap_center: int, gap_size: int):
         self.x = float(x)
         self.gap_center = int(gap_center)
         self.gap_size = int(gap_size)
-        self.width = 80
         self.passed = False
-        self.color = color
-        self.rim = rim
+        # images
+        self.top_img = PIPE_TOP_IMG
+        self.bot_img = PIPE_BOTTOM_IMG
+        self.width   = self.bot_img.get_width()
+        self.top_h   = self.top_img.get_height()
+        self.bot_h   = self.bot_img.get_height()
 
     @property
-    def top(self): return self.gap_center - self.gap_size//2
+    def top(self):    return self.gap_center - self.gap_size//2
     @property
     def bottom(self): return self.gap_center + self.gap_size//2
 
@@ -194,44 +270,44 @@ class Pipe:
         self.x -= PIPE_VEL
 
     def draw(self, win):
-        # Clamp pour éviter tout rectangle hors-surface
-        top = max(0, self.top)
-        bottom = min(HEIGHT, self.bottom)
-        # Fûts
-        if top > 0:
-            pygame.draw.rect(win, self.color, pygame.Rect(int(self.x), 0, self.width, top))
-        if bottom < HEIGHT:
-            pygame.draw.rect(win, self.color, pygame.Rect(int(self.x), bottom, self.width, HEIGHT - bottom))
-        # Bords (rim) – clampés
-        rim_th = 10
-        rim_top_y = max(0, top - rim_th)
-        rim_bot_y = min(HEIGHT - rim_th, bottom)
-        pygame.draw.rect(win, self.rim, pygame.Rect(int(self.x)-6, rim_top_y, self.width+12, rim_th))
-        pygame.draw.rect(win, self.rim, pygame.Rect(int(self.x)-6, rim_bot_y, self.width+12, rim_th))
+        # positionne l'extrémité du tuyau vers le gap
+        top_y = self.top - self.top_h     # le bas du tuyau top arrive à self.top
+        bot_y = self.bottom               # le haut du tuyau bottom part à self.bottom
+        win.blit(self.top_img, (int(self.x), int(top_y)))
+        win.blit(self.bot_img, (int(self.x), int(bot_y)))
 
 class Base:
+    """Base texturée PNG qui défile en boucle sous le FLOOR_Y."""
     def __init__(self, y: int):
         self.y = y
-        self.x1 = 0
-        self.x2 = WIDTH
+        self.img = BASE_IMG
+        self.w   = self.img.get_width()
+        self.x1  = 0
+        self.x2  = self.w
+
     def move(self):
-        self.x1 -= PIPE_VEL; self.x2 -= PIPE_VEL
-        if self.x1 + WIDTH < 0: self.x1 = self.x2 + WIDTH
-        if self.x2 + WIDTH < 0: self.x2 = self.x1 + WIDTH
-    def draw(self, win, color=(150,120,80)):
-        pygame.draw.rect(win, color, pygame.Rect(int(self.x1), self.y, WIDTH, HEIGHT-self.y))
-        pygame.draw.rect(win, color, pygame.Rect(int(self.x2), self.y, WIDTH, HEIGHT-self.y))
+        self.x1 -= PIPE_VEL
+        self.x2 -= PIPE_VEL
+        if self.x1 + self.w <= 0:
+            self.x1 = self.x2 + self.w
+        if self.x2 + self.w <= 0:
+            self.x2 = self.x1 + self.w
+
+    def draw(self, win):
+        win.blit(self.img, (int(self.x1), self.y))
+        win.blit(self.img, (int(self.x2), self.y))
 
 # ============== Rendu ==============
 def draw_window(win, birds: List[Bird], pipes: List[Pipe], base: Base, score: int, gen_num: int, alive: int, skin_idx: int):
-    bg, pipe_c, rim_c, bird_c, ui = SKINS[skin_idx]
+    _, _, _, _, ui = SKINS[skin_idx]
     win.blit(BG_IMG, (0, 0))
     for p in pipes: p.draw(win)
     base.draw(win)
-    score_surf = STAT_FONT.render(f"Score: {score}", True, ui)
+    # Score centré
+    draw_centered_score(win, score, ui)
+    # Infos à gauche
     gen_surf   = STAT_FONT.render(f"Gen: {gen_num}", True, ui)
     alive_surf = STAT_FONT.render(f"Alive: {alive}", True, ui)
-    win.blit(score_surf, (WIDTH - score_surf.get_width() - 10, 10))
     win.blit(gen_surf, (10, 10))
     win.blit(alive_surf, (10, 36))
     # Bouton graph
@@ -240,20 +316,25 @@ def draw_window(win, birds: List[Bird], pipes: List[Pipe], base: Base, score: in
     pygame.display.update()
 
 def draw_menu(win, skin_idx: int):
-    bg, _, _, _, ui = SKINS[skin_idx]
+    _, _, _, _, ui = SKINS[skin_idx]
     win.blit(MENU_BG_IMG, (0, 0))
     title = BIG_FONT.render("FLAPPY BIRD — NEAT v2", True, ui)
-    win.blit(title, title.get_rect(center=(WIDTH//2, HEIGHT//2 - 160)))
-    m1 = STAT_FONT.render("[1] Entraîner l'IA (infini)", True, ui)
-    m2 = STAT_FONT.render("[2] Jouer manuellement", True, ui)
-    m3 = STAT_FONT.render("[3] Voir le champion", True, ui)
-    m4 = STAT_FONT.render("[S] Changer de skin   [ESC] Quitter   [G] Graph", True, ui)
-    for i, s in enumerate([m1, m2, m3, m4]):
-        win.blit(s, s.get_rect(center=(WIDTH//2, HEIGHT//2 - 40 + i*46)))
-    hint = STAT_FONT.render(f"Sessions jouées: {len(SESS_LOG)} (graphe toutes les 10)", True, ui)
-    win.blit(hint, (10, HEIGHT - 34))
-    # Bouton graph
+    win.blit(title, title.get_rect(center=(WIDTH//2, HEIGHT//2 - 190)))
+    rects = get_menu_button_rects()
+    labels = {
+        "train": "🚀 Entraîner l'IA (1)",
+        "play" : "🎮 Jouer (2)",
+        "champ": "👑 Champion (3)",
+        "skin" : "🎨 Skin (S)",
+        "bg"   : "🖼️ Background (B)",
+        "quit" : "❌ Quitter (ESC)",
+    }
+    mouse = pygame.mouse.get_pos()
+    for k, r in rects.items():
+        draw_button(win, r, labels[k], ui, hover=r.collidepoint(mouse))
     draw_graph_button(win, ui)
+    hint = STAT_FONT.render(f"Sessions jouées: {len(SESS_LOG)} (graphe toutes les 10)", True, ui)
+    win.blit(hint, (12, HEIGHT - 30))
     pygame.display.update()
 
 def draw_banner(win, text: str, skin_idx: int):
@@ -264,84 +345,72 @@ def draw_banner(win, text: str, skin_idx: int):
     win.blit(banner, banner.get_rect(center=(WIDTH//2, 110)))
     pygame.display.update()
 
-# ============== GÉNÉRATION DES TUYAUX DIVERSIFIÉS (gap +++ variable, safe) ==============
-SAFE_PAD         = 80             # marge haut/bas pour rester fair
-GAP_MIN          = 120            # plus petit trou (plus dur)
-GAP_MAX          = 230            # plus grand trou (plus facile)
-MAX_CENTER_STEP  = 42             # déplacement vertical max du centre par tuyau
-
-# Jitter de la TAILLE du gap (proba élevée + "coup de boost" occasionnel)
-GAP_JITTER_PROB  = 0.85           # chance d’ajuster la taille du gap à chaque pipe
-GAP_JITTER_DELTA = 26             # variation standard ±
-GAP_STRONG_PROB  = 0.25           # chance d’un jitter fort en plus
-GAP_STRONG_BOOST = 22             # taille du jitter fort (ajouté ou retiré)
+# ============== Génération tuyaux variés (gap sûr) ==============
+SAFE_PAD         = 80
+GAP_MIN          = 120
+GAP_MAX          = 230
+MAX_CENTER_STEP  = 42
+GAP_JITTER_PROB  = 0.85
+GAP_JITTER_DELTA = 26
+GAP_STRONG_PROB  = 0.25
+GAP_STRONG_BOOST = 22
 
 _center_state = None
 _gap_state    = None
 
 def _safe_center(center:int, gap:int) -> int:
-    """Clamp le centre pour que le trou reste dans la zone jouable."""
     half = gap // 2
     lo   = SAFE_PAD + half
     hi   = FLOOR_Y - SAFE_PAD - half
     return max(lo, min(hi, center))
 
 def reset_gap_sequence():
-    """Réinitialise la séquence (appelé par prime_pipes au début d’une partie)."""
     global _center_state, _gap_state
     _center_state = None
     _gap_state    = None
 
 def next_pipe_params():
-    """Retourne (center, gap) pour le prochain tuyau, très varié mais safe."""
     global _center_state, _gap_state
-
-    # init
     if _center_state is None:
         base_gap      = min(max(PIPE_GAP, GAP_MIN), GAP_MAX)
         _gap_state    = base_gap
         _center_state = _safe_center(FLOOR_Y // 2, _gap_state)
         return _center_state, _gap_state
-
-    # random walk vertical
     step          = random.randint(-MAX_CENTER_STEP, MAX_CENTER_STEP)
     candidate_ctr = _center_state + step
-
-    # jitter de la taille du gap
     gap = _gap_state
     if random.random() < GAP_JITTER_PROB:
         delta = random.randint(-GAP_JITTER_DELTA, GAP_JITTER_DELTA)
         if random.random() < GAP_STRONG_PROB:
             delta += random.choice([-GAP_STRONG_BOOST, GAP_STRONG_BOOST])
         gap = max(GAP_MIN, min(GAP_MAX, gap + delta))
-
-    # clamp du centre avec le gap choisi
     center = _safe_center(candidate_ctr, gap)
-
-    # commit
     _center_state = center
     _gap_state    = gap
     return center, gap
 
-def prime_pipes(pipe_c, rim_c, count=3):
-    """Crée d'emblée quelques tuyaux espacés régulièrement à droite (variés, safe)."""
+def prime_pipes(count=3):
+    """Crée quelques tuyaux espacés à droite (anti-stack garanti)."""
     reset_gap_sequence()
-    spacing = int(PIPE_VEL * FPS * TIME_BETWEEN_PIPES)
+    spacing = max(MIN_PIPE_SPACING_PX, int(PIPE_VEL * FPS * TIME_BETWEEN_PIPES))
     x0 = WIDTH + SPAWN_OFFSET_X
     pipes = []
     for k in range(count):
         c, g = next_pipe_params()
-        pipes.append(Pipe(x0 + k*spacing, c, g, color=pipe_c, rim=rim_c))
+        pipes.append(Pipe(x0 + k*spacing, c, g))
     return pipes
 
-def spawn_pipe(pipes, pipe_c, rim_c):
-    """Ajoute un tuyau cadencé (varié, safe)."""
+def spawn_pipe(pipes):
+    """Ajoute un tuyau à droite, en respectant un espacement minimum vs le dernier."""
     c, g = next_pipe_params()
-    pipes.append(Pipe(WIDTH + SPAWN_OFFSET_X, c, g, color=pipe_c, rim=rim_c))
+    if pipes:
+        base_x = max(WIDTH + SPAWN_OFFSET_X, pipes[-1].x + MIN_PIPE_SPACING_PX)
+    else:
+        base_x = WIDTH + SPAWN_OFFSET_X
+    pipes.append(Pipe(base_x, c, g))
 
-# ============== Graphe Matplotlib (ligne + points) ==============
+# ============== Graphe Matplotlib ==============
 def _plot_last10_process(data, total_len):
-    """Process séparé pour afficher le graphe (évite de geler la boucle Pygame)."""
     try:
         import matplotlib.pyplot as plt
     except Exception:
@@ -349,36 +418,24 @@ def _plot_last10_process(data, total_len):
     scores = [d["score"] for d in data]
     xs = list(range(len(data)))
     labels = [str(total_len - (len(data)-1) + i) for i in range(len(data))]
-    # Coloriage par mode
     auto_idx = [i for i,d in enumerate(data) if d["mode"] == "auto"]
     man_idx  = [i for i,d in enumerate(data) if d["mode"] == "manual"]
     auto_scores = [scores[i] for i in auto_idx]
     man_scores  = [scores[i] for i in man_idx]
-
     plt.figure("Scores — 10 dernières sessions (ligne + points)")
     plt.clf()
-    # Ligne globale
     plt.plot(xs, scores, "-o", linewidth=2, markersize=6, label="Score", color="#1f77b4")
-    # Points recolorés par mode
     if auto_idx:
         plt.scatter(auto_idx, auto_scores, s=60, c="c", marker="o", edgecolors="black", zorder=3, label="Auto")
     if man_idx:
         plt.scatter(man_idx,  man_scores,  s=60, c="gold", marker="o", edgecolors="black", zorder=3, label="Manuel")
-
     plt.xticks(xs, labels, rotation=0)
-    plt.xlabel("Session")
-    plt.ylabel("Score max")
-    plt.title("Évolution des 10 derniers scores")
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
-    try:
-        plt.show(block=True)  # on peut bloquer ici (process séparé)
-    except Exception:
-        pass
+    plt.xlabel("Session"); plt.ylabel("Score max"); plt.title("Évolution des 10 derniers scores")
+    plt.grid(True, alpha=0.3); plt.legend(); plt.tight_layout()
+    try: plt.show(block=True)
+    except Exception: pass
 
 def show_last_10_sessions_matplotlib():
-    """Lance une popup Matplotlib (ligne + points) dans un process à part."""
     if not SESS_LOG:
         return
     data = SESS_LOG[-10:]
@@ -386,63 +443,12 @@ def show_last_10_sessions_matplotlib():
     p.daemon = False
     p.start()
 
-# (option) Overlay pygame si tu préfères rester 100% pygame
-def show_last_10_sessions_screen():
-    if not SESS_LOG:
-        return
-    data = SESS_LOG[-10:]
-    max_score = max(1, max(item["score"] for item in data))
-    running = True
-    clock = pygame.time.Clock()
-    _, _, _, _, ui = SKINS[SKIN_IDX]
-    while running:
-        clock.tick(60)
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                pygame.quit(); sys.exit()
-            if event.type == pygame.KEYDOWN or event.type == pygame.MOUSEBUTTONDOWN:
-                running = False
-        WIN.blit(MENU_BG_IMG, (0, 0))
-        title = BIG_FONT.render("Dernières 10 sessions", True, ui)
-        WIN.blit(title, title.get_rect(center=(WIDTH//2, 70)))
-        x, y, w, h = 40, 140, WIDTH - 80, 520
-        panel = pygame.Surface((w, h), pygame.SRCALPHA); panel.fill((0,0,0,110))
-        pygame.draw.rect(panel, (220,220,220,180), pygame.Rect(0,0,w,h), 1)
-        margin_left = 40; margin_bottom = 40
-        gx0, gy0 = margin_left, h - margin_bottom
-        gx1, gy1 = w - 15, 25
-        for i in range(6):
-            yy = int(gy0 - i * (gy0 - gy1) / 5)
-            pygame.draw.line(panel, (200,200,200,120), (gx0, yy), (gx1, yy), 1)
-            val = int(i * max_score / 5)
-            lab = STAT_FONT.render(str(val), True, ui)
-            panel.blit(lab, (5, yy - 10))
-        n = len(data); bar_space = (gx1 - gx0 - 10)
-        bw = max(10, bar_space // max(1, n) - 8)
-        for i, item in enumerate(data):
-            v = item["score"]; mode = item["mode"]
-            color = (0,255,255,255) if mode == "auto" else (255,215,0,255)
-            px = gx0 + 10 + i * (bw + 8)
-            hh = 0 if max_score <= 0 else int((v / max_score) * (gy0 - gy1))
-            py = gy0 - hh
-            pygame.draw.rect(panel, color, pygame.Rect(px, py, bw, hh), border_radius=4)
-            lbl = STAT_FONT.render(str(len(SESS_LOG) - (n - 1 - i)), True, ui)
-            panel.blit(lbl, (px, gy0 + 6))
-        legend_auto = STAT_FONT.render("Auto (NEAT) = cyan", True, ui)
-        legend_man  = STAT_FONT.render("Manuel = jaune", True, ui)
-        panel.blit(legend_auto, (w - legend_auto.get_width() - 10, 6))
-        panel.blit(legend_man,  (w - legend_man.get_width() - 10, 28))
-        WIN.blit(panel, (x, y))
-        tip = STAT_FONT.render("Appuie sur une touche pour continuer", True, ui)
-        WIN.blit(tip, tip.get_rect(center=(WIDTH//2, HEIGHT - 30)))
-        pygame.display.flip()
-
 # ============== Évaluation (NEAT) ==============
 def eval_genomes(genomes, config):
     global SKIN_IDX, STOP_TRAINING, SESSION_AUTO_BEST_SCORE
 
     nets, ge, birds = [], [], []
-    bg, pipe_c, rim_c, bird_c, ui = SKINS[SKIN_IDX]
+    _, _, _, bird_c, _ = SKINS[SKIN_IDX]
 
     for _, g in genomes:
         net = make_net(g, config)
@@ -452,7 +458,7 @@ def eval_genomes(genomes, config):
         ge.append(g)
 
     base  = Base(FLOOR_Y)
-    pipes = prime_pipes(pipe_c, rim_c, count=3)
+    pipes = prime_pipes(count=3)
     score = 0
     SESSION_AUTO_BEST_SCORE = 0
 
@@ -466,18 +472,15 @@ def eval_genomes(genomes, config):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit(); sys.exit()
-            # Bouton + hotkey G
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                if is_graph_button(event.pos):
-                    handle_graph_request()
+                if is_graph_button(event.pos): handle_graph_request()
             if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_g:
-                    handle_graph_request()
-                if event.key == pygame.K_ESCAPE:
-                    STOP_TRAINING = True
+                if event.key == pygame.K_g: handle_graph_request()
+                if event.key == pygame.K_s: SKIN_IDX = (SKIN_IDX + 1) % len(SKINS)
+                if event.key == pygame.K_b: cycle_background(+1)
+                if event.key == pygame.K_ESCAPE: STOP_TRAINING = True
 
-        if len(birds) == 0:
-            break
+        if len(birds) == 0: break
 
         # cible
         pipe_ind = 0
@@ -545,8 +548,7 @@ def eval_genomes(genomes, config):
                 add_point = True
 
             p.move()
-            if p.x + p.width < 0:
-                rem_pipes.append(p)
+            if p.x + p.width < 0: rem_pipes.append(p)
 
         if add_point:
             score += 1
@@ -556,16 +558,15 @@ def eval_genomes(genomes, config):
             for g in ge: g.fitness += 5.0
 
         for r in rem_pipes:
-            if r in pipes:
-                pipes.remove(r)
+            if r in pipes: pipes.remove(r)
 
         if dead_idx:
             for idx in sorted(dead_idx, reverse=True):
                 birds.pop(idx); nets.pop(idx); ge.pop(idx)
 
-        # Spawn régulier (cadencé)
+        # Spawn régulier (cadencé) — anti-stack: x basé sur dernier pipe
         while spawn_acc >= TIME_BETWEEN_PIPES:
-            spawn_pipe(pipes, pipe_c, rim_c)
+            spawn_pipe(pipes)
             spawn_acc -= TIME_BETWEEN_PIPES
 
         base.move()
@@ -593,9 +594,7 @@ def train_ai(config_path, skin_idx=0, save_winner=True, ckpt_every=10):
 
     while not STOP_TRAINING:
         p.run(eval_genomes, 1)
-        if STOP_TRAINING:
-            break
-
+        if STOP_TRAINING: break
         pop_vals = [g for g in p.population.values() if g.fitness is not None]
         if pop_vals:
             current_best = max(pop_vals, key=lambda g: g.fitness)
@@ -611,8 +610,7 @@ def train_ai(config_path, skin_idx=0, save_winner=True, ckpt_every=10):
 def watch_champion(config_path, winner_path="winner.pkl", skin_idx=0):
     global SKIN_IDX
     SKIN_IDX = skin_idx
-    if not os.path.exists(winner_path):
-        return
+    if not os.path.exists(winner_path): return
 
     with open(winner_path, "rb") as f:
         winner = pickle.load(f)
@@ -622,10 +620,10 @@ def watch_champion(config_path, winner_path="winner.pkl", skin_idx=0):
                                 config_path)
     net = make_net(winner, config)
 
-    bg, pipe_c, rim_c, bird_c, ui = SKINS[SKIN_IDX]
+    _, _, _, bird_c, _ = SKINS[SKIN_IDX]
     base  = Base(FLOOR_Y)
     bird  = Bird(120, HEIGHT//2, color=bird_c)
-    pipes = prime_pipes(pipe_c, rim_c, count=3)
+    pipes = prime_pipes(count=3)
     score = 0
 
     clock = pygame.time.Clock()
@@ -638,15 +636,13 @@ def watch_champion(config_path, winner_path="winner.pkl", skin_idx=0):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit(); sys.exit()
-            # Bouton + hotkey G
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                if is_graph_button(event.pos):
-                    handle_graph_request()
+                if is_graph_button(event.pos): handle_graph_request()
             if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_g:
-                    handle_graph_request()
-                if event.key == pygame.K_ESCAPE:
-                    run = False
+                if event.key == pygame.K_g: handle_graph_request()
+                if event.key == pygame.K_s: SKIN_IDX = (SKIN_IDX + 1) % len(SKINS)
+                if event.key == pygame.K_b: cycle_background(+1)
+                if event.key == pygame.K_ESCAPE: run = False
 
         pipe_ind = 0
         if len(pipes) > 1 and bird.x > pipes[0].x + pipes[0].width:
@@ -699,7 +695,7 @@ def watch_champion(config_path, winner_path="winner.pkl", skin_idx=0):
             if r in pipes: pipes.remove(r)
 
         while spawn_acc >= TIME_BETWEEN_PIPES:
-            spawn_pipe(pipes, pipe_c, rim_c)
+            spawn_pipe(pipes)
             spawn_acc -= TIME_BETWEEN_PIPES
 
         base.move()
@@ -709,11 +705,11 @@ def watch_champion(config_path, winner_path="winner.pkl", skin_idx=0):
 def play_manual(skin_idx=0):
     global SKIN_IDX
     SKIN_IDX = skin_idx
-    bg, pipe_c, rim_c, bird_c, ui = SKINS[SKIN_IDX]
+    _, _, _, bird_c, _ = SKINS[SKIN_IDX]
 
     base  = Base(FLOOR_Y)
     bird  = Bird(120, HEIGHT//2, color=bird_c)
-    pipes = prime_pipes(pipe_c, rim_c, count=3)
+    pipes = prime_pipes(count=3)
     score = 0
 
     clock = pygame.time.Clock()
@@ -726,13 +722,13 @@ def play_manual(skin_idx=0):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit(); sys.exit()
-            # Bouton + hotkey G
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                if is_graph_button(event.pos):
-                    handle_graph_request()
+                if is_graph_button(event.pos): handle_graph_request()
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_SPACE: bird.jump()
                 if event.key == pygame.K_g:     handle_graph_request()
+                if event.key == pygame.K_s:     SKIN_IDX = (SKIN_IDX + 1) % len(SKINS)
+                if event.key == pygame.K_b:     cycle_background(+1)
                 if event.key == pygame.K_ESCAPE: run = False
 
         bird.move()
@@ -764,7 +760,7 @@ def play_manual(skin_idx=0):
             if r in pipes: pipes.remove(r)
 
         while spawn_acc >= TIME_BETWEEN_PIPES:
-            spawn_pipe(pipes, pipe_c, rim_c)
+            spawn_pipe(pipes)
             spawn_acc -= TIME_BETWEEN_PIPES
 
         base.move()
@@ -862,15 +858,37 @@ def main():
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit(); sys.exit()
-            # Bouton + hotkey G
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 if is_graph_button(event.pos):
                     handle_graph_request()
+                rects = get_menu_button_rects()
+                if rects["train"].collidepoint(event.pos):
+                    draw_banner(WIN, "Entraînement en cours... (ESC pour stopper)", skin)
+                    train_ai(config_path, skin_idx=skin, save_winner=True, ckpt_every=10)
+                    draw_banner(WIN, "Entraînement stoppé. [3] pour voir le champion.", skin)
+                elif rects["play"].collidepoint(event.pos):
+                    play_manual(skin_idx=skin)
+                elif rects["champ"].collidepoint(event.pos):
+                    if os.path.exists("winner.pkl"):
+                        watch_champion(config_path, "winner.pkl", skin_idx=skin)
+                    else:
+                        draw_banner(WIN, "Pas de champion (entraîne d'abord).", skin)
+                elif rects["skin"].collidepoint(event.pos):
+                    skin = (skin + 1) % len(SKINS)
+                elif rects["bg"].collidepoint(event.pos):
+                    cycle_background(+1)
+                elif rects["quit"].collidepoint(event.pos):
+                    pygame.quit(); sys.exit()
+
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     pygame.quit(); sys.exit()
                 if event.key == pygame.K_g:
                     handle_graph_request()
+                if event.key == pygame.K_b:
+                    cycle_background(+1)
+                if event.key == pygame.K_s:
+                    skin = (skin + 1) % len(SKINS)
                 if event.key == pygame.K_1:
                     draw_banner(WIN, "Entraînement en cours... (ESC pour stopper)", skin)
                     train_ai(config_path, skin_idx=skin, save_winner=True, ckpt_every=10)
@@ -882,8 +900,6 @@ def main():
                         watch_champion(config_path, "winner.pkl", skin_idx=skin)
                     else:
                         draw_banner(WIN, "Pas de champion (entraîne d'abord).", skin)
-                if event.key == pygame.K_s:
-                    skin = (skin + 1) % len(SKINS)
 
 if __name__ == "__main__":
     main()
