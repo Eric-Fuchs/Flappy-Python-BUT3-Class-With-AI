@@ -1,7 +1,7 @@
-# Flappy Bird — NEAT v2 (graph "10 dernières sessions")
+# Flappy Bird — NEAT v2 (gap constant, timer spacing, graphe ligne+points en popup)
 # Auteur: Tom
-# Dépendances: pygame, neat-python
-#   pip install pygame neat-python
+# Dépendances: pygame, neat-python, matplotlib
+#   pip install pygame neat-python matplotlib
 
 import os
 import sys
@@ -10,6 +10,7 @@ import pickle
 import time
 import csv
 from typing import List
+from multiprocessing import Process  # popup graphe sans bloquer le jeu
 
 try:
     import pygame
@@ -24,6 +25,13 @@ try:
 except Exception:
     print("Le paquet 'neat-python' est manquant. Installe-le avec: pip install neat-python")
     raise
+
+# Matplotlib (popup graphe) — on tente ici; si non dispo, le process fera un 2e essai
+try:
+    import matplotlib.pyplot as plt
+except Exception:
+    plt = None
+    print("Matplotlib non dispo: pip install matplotlib (le jeu continue sans le graphe).")
 
 # ============== Fenêtre & globals ==============
 pygame.init()
@@ -47,42 +55,48 @@ SKINS = [
 ]
 SKIN_IDX = 0
 
-#============= Textures ==============
+#============= Textures (assure les fichiers en assets/) ==============
 BG_IMG = pygame.transform.scale(pygame.image.load("assets/bg.png").convert(), (WIDTH, HEIGHT))
 BIRD_IMG = pygame.image.load("assets/bird1.png").convert_alpha()
 MENU_BG_IMG = pygame.transform.scale(pygame.image.load(os.path.join("assets", "bg1.png")).convert(), (WIDTH, HEIGHT))
 
-# Sons
+# Sons (assure les fichiers en sounds/)
 SND_FLAP  = pygame.mixer.Sound("sounds/se_go_ball_gotcha.wav")
 SND_POINT = pygame.mixer.Sound("sounds/SE164_001.wav")
 SND_HIT   = pygame.mixer.Sound("sounds/gameover.mp3")
 SND_DIE   = pygame.mixer.Sound("sounds/gameover.mp3")
 SND_BG    = pygame.mixer.Sound("sounds/bg_sound2.mp3")
 for s in (SND_FLAP, SND_POINT, SND_HIT, SND_DIE, SND_BG):
-    s.set_volume(0.1)
+    s.set_volume(0.2)
 
 def play_menu_music():
     SND_BG.set_volume(1)
     SND_BG.play(-1)
 
-# Physique / gameplay
-GRAVITY       = 0.5
-JUMP_VELOCITY = -8.5
-PIPE_GAP      = 200
-PIPE_DISTANCE = 1
-PIPE_VEL      = 5
+# ===== Gameplay (timer spacing + gap constant) =====
+FPS               = 60
+GRAVITY           = 0.5
+JUMP_VELOCITY     = -8.5
+PIPE_VEL          = 5
+
+PIPE_GAP          = 180     # taille du trou (constante)
+TIME_BETWEEN_PIPES= 0.78    # s entre colonnes (0.72–0.85 = serré)
+SPAWN_OFFSET_X    = 70      # spawn juste hors-écran
+
+# Gap constant : centre fixe (tu peux choisir une autre valeur si tu veux)
+GAP_CENTER_FIXED  = FLOOR_Y // 2  # centre du trou au milieu de la zone jouable
 
 # Entraînement / affichage
 gen = 0
 STOP_TRAINING = False
 
 # === Sessions logging (manuel + auto) ===
-SESS_LOG = []  # liste de dicts {"mode": "manual"|"auto", "score": int}
+SESS_LOG = []  # {"mode": "manual"|"auto", "score": int}
 SESS_CSV = "sessions_summary.csv"
+SESSION_AUTO_BEST_SCORE = 0  # meilleur score observé pendant 1 session auto
 
-# Helper CSV
 def record_session(mode: str, best_score: int):
-    """Ajoute une session au log mémoire + CSV. Déclenche l'affichage si multiple de 10."""
+    """Ajoute une session au log + CSV. Toutes les 10: popup matplotlib."""
     entry = {"mode": mode, "score": int(best_score)}
     SESS_LOG.append(entry)
 
@@ -96,23 +110,20 @@ def record_session(mode: str, best_score: int):
     except Exception as e:
         print("session log error:", e)
 
-    # Toutes les 10 parties (auto+manuel cumulées), on affiche le graphe
     if len(SESS_LOG) % 10 == 0:
-        show_last_10_sessions_screen()
+        show_last_10_sessions_matplotlib()  # popup externe (process)
 
 # ============== Utils ==============
 def clamp01(x: float) -> float:
     return 0.0 if x < 0.0 else (1.0 if x > 1.0 else x)
 
 def make_net(genome, config):
-    # Choisit feedforward ou recurrent selon config
     if config.genome_config.feed_forward:
         return neat.nn.FeedForwardNetwork.create(genome, config)
     else:
         return neat.nn.RecurrentNetwork.create(genome, config)
 
 class UISyncReporter(BaseReporter):
-    """Synchronise le compteur de génération 'gen' affiché à l'écran avec celui de NEAT."""
     def start_generation(self, generation):
         global gen
         gen = generation
@@ -164,12 +175,20 @@ class Pipe:
         self.x -= PIPE_VEL
 
     def draw(self, win):
-        top = self.top; bottom = self.bottom
-        pygame.draw.rect(win, self.color, pygame.Rect(int(self.x), 0, self.width, max(0, top)))
-        pygame.draw.rect(win, self.color, pygame.Rect(int(self.x), bottom, self.width, max(0, HEIGHT-bottom)))
+        # Clamp pour éviter tout rectangle hors-surface (sécurise l'affichage)
+        top = max(0, self.top)
+        bottom = min(HEIGHT, self.bottom)
+        # Fûts
+        if top > 0:
+            pygame.draw.rect(win, self.color, pygame.Rect(int(self.x), 0, self.width, top))
+        if bottom < HEIGHT:
+            pygame.draw.rect(win, self.color, pygame.Rect(int(self.x), bottom, self.width, HEIGHT - bottom))
+        # Bords (rim) – clampés
         rim_th = 10
-        pygame.draw.rect(win, self.rim, pygame.Rect(int(self.x)-6, top - rim_th, self.width+12, rim_th))
-        pygame.draw.rect(win, self.rim, pygame.Rect(int(self.x)-6, bottom, self.width+12, rim_th))
+        rim_top_y = max(0, top - rim_th)
+        rim_bot_y = min(HEIGHT - rim_th, bottom)
+        pygame.draw.rect(win, self.rim, pygame.Rect(int(self.x)-6, rim_top_y, self.width+12, rim_th))
+        pygame.draw.rect(win, self.rim, pygame.Rect(int(self.x)-6, rim_bot_y, self.width+12, rim_th))
 
 class Base:
     def __init__(self, y: int):
@@ -210,111 +229,145 @@ def draw_menu(win, skin_idx: int):
     m4 = STAT_FONT.render("[S] Changer de skin   [ESC] Quitter", True, ui)
     for i, s in enumerate([m1, m2, m3, m4]):
         win.blit(s, s.get_rect(center=(WIDTH//2, HEIGHT//2 - 40 + i*46)))
-    # hint sessions
-    hint = STAT_FONT.render(f"Sessions jouées: {len(SESS_LOG)} (graph auto toutes les 10)", True, ui)
+    hint = STAT_FONT.render(f"Sessions jouées: {len(SESS_LOG)} (graphe toutes les 10)", True, ui)
     win.blit(hint, (10, HEIGHT - 34))
     pygame.display.update()
 
 def draw_banner(win, text: str, skin_idx: int):
     _, _, _, _, ui = SKINS[skin_idx]
     banner = BIG_FONT.render(text, True, ui)
-    # voile pour lisibilité
     overlay = pygame.Surface((WIDTH, 120), pygame.SRCALPHA); overlay.fill((0,0,0,110))
     win.blit(overlay, (0, 50))
     win.blit(banner, banner.get_rect(center=(WIDTH//2, 110)))
     pygame.display.update()
 
-# ============== Génération tuyaux ==============
-def new_pipe_x(prev_x): return prev_x + PIPE_DISTANCE
-def random_gap_center():
-    margin = 100
-    return random.randint(margin, FLOOR_Y - margin)
+# ============== GÉNÉRATION DES TUYAUX DIVERSIFIÉS (gap +++ variable, safe) ==============
+# Variation douce du centre + variation plus marquée de la TAILLE du gap.
+# Tout est clampé pour éviter les pièges impossibles.
 
-# ============== Graph "10 dernières sessions" ==============
-def show_last_10_sessions_screen():
-    """Affiche un écran avec barres des 10 dernières sessions (manuel=jaune, auto=cyan)."""
+SAFE_PAD         = 80             # marge haut/bas pour rester fair
+GAP_MIN          = 120            # plus petit trou (plus dur)
+GAP_MAX          = 230            # plus grand trou (plus facile)
+MAX_CENTER_STEP  = 42             # déplacement vertical max du centre par tuyau
+
+# Jitter de la TAILLE du gap (proba élevée + "coup de boost" occasionnel)
+GAP_JITTER_PROB  = 0.85           # chance d’ajuster la taille du gap à chaque pipe
+GAP_JITTER_DELTA = 26             # variation standard ±
+GAP_STRONG_PROB  = 0.25           # chance d’un jitter fort en plus
+GAP_STRONG_BOOST = 22             # taille du jitter fort (ajouté ou retiré)
+
+_center_state = None
+_gap_state    = None
+
+def _safe_center(center:int, gap:int) -> int:
+    """Clamp le centre pour que le trou reste dans la zone jouable."""
+    half = gap // 2
+    lo   = SAFE_PAD + half
+    hi   = FLOOR_Y - SAFE_PAD - half
+    return max(lo, min(hi, center))
+
+def reset_gap_sequence():
+    """Réinitialise la séquence (appelé par prime_pipes au début d’une partie)."""
+    global _center_state, _gap_state
+    _center_state = None
+    _gap_state    = None
+
+def next_pipe_params():
+    """Retourne (center, gap) pour le prochain tuyau, très varié mais safe."""
+    global _center_state, _gap_state
+
+    # init: au milieu avec un gap de base
+    if _center_state is None:
+        base_gap      = min(max(PIPE_GAP, GAP_MIN), GAP_MAX)
+        _gap_state    = base_gap
+        _center_state = _safe_center(FLOOR_Y // 2, _gap_state)
+        return _center_state, _gap_state
+
+    # 1) random walk vertical (borné)
+    step          = random.randint(-MAX_CENTER_STEP, MAX_CENTER_STEP)
+    candidate_ctr = _center_state + step
+
+    # 2) jitter de la TAILLE du gap (souvent) + occasional strong boost
+    gap = _gap_state
+    if random.random() < GAP_JITTER_PROB:
+        delta = random.randint(-GAP_JITTER_DELTA, GAP_JITTER_DELTA)
+        if random.random() < GAP_STRONG_PROB:
+            delta += random.choice([-GAP_STRONG_BOOST, GAP_STRONG_BOOST])
+        gap = max(GAP_MIN, min(GAP_MAX, gap + delta))
+
+    # 3) re-clamp centre avec la nouvelle taille
+    center = _safe_center(candidate_ctr, gap)
+
+    # 4) commit
+    _center_state = center
+    _gap_state    = gap
+    return center, gap
+
+def prime_pipes(pipe_c, rim_c, count=3):
+    """Crée d'emblée quelques tuyaux espacés régulièrement à droite (variés, safe)."""
+    reset_gap_sequence()
+    spacing = int(PIPE_VEL * FPS * TIME_BETWEEN_PIPES)
+    x0 = WIDTH + SPAWN_OFFSET_X
+    pipes = []
+    for k in range(count):
+        c, g = next_pipe_params()
+        pipes.append(Pipe(x0 + k*spacing, c, g, color=pipe_c, rim=rim_c))
+    return pipes
+
+def spawn_pipe(pipes, pipe_c, rim_c):
+    """Ajoute un tuyau cadencé (varié, safe)."""
+    c, g = next_pipe_params()
+    pipes.append(Pipe(WIDTH + SPAWN_OFFSET_X, c, g, color=pipe_c, rim=rim_c))
+# ============== Graphe Matplotlib (ligne + points) ==============
+def _plot_last10_process(data, total_len):
+    """Process séparé pour afficher le graphe (évite de geler la boucle Pygame)."""
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        return
+    scores = [d["score"] for d in data]
+    xs = list(range(len(data)))
+    labels = [str(total_len - (len(data)-1) + i) for i in range(len(data))]
+    # Coloriage par mode
+    auto_idx = [i for i,d in enumerate(data) if d["mode"] == "auto"]
+    man_idx  = [i for i,d in enumerate(data) if d["mode"] == "manual"]
+    auto_scores = [scores[i] for i in auto_idx]
+    man_scores  = [scores[i] for i in man_idx]
+
+    plt.figure("Scores — 10 dernières sessions (ligne + points)")
+    plt.clf()
+    # Ligne globale
+    plt.plot(xs, scores, "-o", linewidth=2, markersize=6, label="Score", color="#1f77b4")
+    # Points recolorés par mode
+    if auto_idx:
+        plt.scatter(auto_idx, auto_scores, s=60, c="c", marker="o", edgecolors="black", zorder=3, label="Auto")
+    if man_idx:
+        plt.scatter(man_idx,  man_scores,  s=60, c="gold", marker="o", edgecolors="black", zorder=3, label="Manuel")
+
+    plt.xticks(xs, labels, rotation=0)
+    plt.xlabel("Session")
+    plt.ylabel("Score max")
+    plt.title("Évolution des 10 derniers scores")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    try:
+        plt.show(block=True)  # on peut bloquer ici (process séparé)
+    except Exception:
+        pass
+
+def show_last_10_sessions_matplotlib():
+    """Lance une popup Matplotlib (ligne + points) dans un process à part."""
     if not SESS_LOG:
         return
-
-    # Récupérer les 10 dernières
     data = SESS_LOG[-10:]
-    max_score = max(1, max(item["score"] for item in data))
-
-    running = True
-    clock = pygame.time.Clock()
-    _, _, _, _, ui = SKINS[SKIN_IDX]
-
-    while running:
-        clock.tick(60)
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                pygame.quit(); sys.exit()
-            if event.type == pygame.KEYDOWN or event.type == pygame.MOUSEBUTTONDOWN:
-                running = False  # fermer le graphe au moindre input
-
-        # fond
-        WIN.blit(MENU_BG_IMG, (0, 0))
-        title = BIG_FONT.render("Dernières 10 sessions", True, ui)
-        WIN.blit(title, title.get_rect(center=(WIDTH//2, 70)))
-
-        # zone graphe
-        x, y, w, h = 40, 140, WIDTH - 80, 520
-        # cadre + voile
-        panel = pygame.Surface((w, h), pygame.SRCALPHA); panel.fill((0,0,0,110))
-        pygame.draw.rect(panel, (220,220,220,180), pygame.Rect(0,0,w,h), 1)
-
-        # axes
-        margin_left = 40
-        margin_bottom = 40
-        gx0, gy0 = margin_left, h - margin_bottom
-        gx1, gy1 = w - 15, 25  # top
-
-        # ticks Y (5)
-        for i in range(6):
-            yy = int(gy0 - i * (gy0 - gy1) / 5)
-            pygame.draw.line(panel, (200,200,200,120), (gx0, yy), (gx1, yy), 1)
-            val = int(i * max_score / 5)
-            lab = STAT_FONT.render(str(val), True, ui)
-            panel.blit(lab, (5, yy - 10))
-
-        # barres
-        n = len(data)
-        bar_space = (gx1 - gx0 - 10)
-        if n > 0:
-            bw = max(10, bar_space // n - 8)  # largeur de barre
-        else:
-            bw = 20
-
-        for i, item in enumerate(data):
-            v = item["score"]
-            mode = item["mode"]
-            color = (0,255,255,255) if mode == "auto" else (255,215,0,255)
-            # position x
-            px = gx0 + 10 + i * (bw + 8)
-            # hauteur normalisée
-            hh = 0 if max_score <= 0 else int((v / max_score) * (gy0 - gy1))
-            py = gy0 - hh
-            pygame.draw.rect(panel, color, pygame.Rect(px, py, bw, hh), border_radius=4)
-            # label session #
-            lbl = STAT_FONT.render(str(len(SESS_LOG) - (n - 1 - i)), True, ui)
-            panel.blit(lbl, (px, gy0 + 6))
-
-        # légende
-        legend_auto = STAT_FONT.render("Auto (NEAT) = cyan", True, ui)
-        legend_man  = STAT_FONT.render("Manuel = jaune", True, ui)
-        panel.blit(legend_auto, (w - legend_auto.get_width() - 10, 6))
-        panel.blit(legend_man,  (w - legend_man.get_width() - 10, 28))
-
-        WIN.blit(panel, (x, y))
-
-        tip = STAT_FONT.render("Appuie sur une touche pour continuer", True, ui)
-        WIN.blit(tip, tip.get_rect(center=(WIDTH//2, HEIGHT - 30)))
-
-        pygame.display.flip()
+    p = Process(target=_plot_last10_process, args=(data, len(SESS_LOG)))
+    p.daemon = False
+    p.start()
 
 # ============== Évaluation (NEAT) ==============
 def eval_genomes(genomes, config):
-    global SKIN_IDX, STOP_TRAINING, PIPE_GAP, PIPE_VEL
+    global SKIN_IDX, STOP_TRAINING, SESSION_AUTO_BEST_SCORE
 
     nets, ge, birds = [], [], []
     bg, pipe_c, rim_c, bird_c, ui = SKINS[SKIN_IDX]
@@ -326,40 +379,42 @@ def eval_genomes(genomes, config):
         g.fitness = 0.0
         ge.append(g)
 
-    base = Base(FLOOR_Y)
-    pipes = [Pipe(350, random_gap_center(), PIPE_GAP, color=pipe_c, rim=rim_c)]
+    base  = Base(FLOOR_Y)
+    pipes = prime_pipes(pipe_c, rim_c, count=3)
     score = 0
+    SESSION_AUTO_BEST_SCORE = 0
 
     clock = pygame.time.Clock()
+    spawn_acc = 0.0
     run = True
     while run and len(birds) > 0 and not STOP_TRAINING:
-        clock.tick(60)
+        dt = clock.tick(FPS) / 1000.0
+        spawn_acc += dt
+
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit(); sys.exit()
             if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                STOP_TRAINING = True  # stop après cette génération
+                STOP_TRAINING = True
 
         if len(birds) == 0:
             break
 
-        # Choix du tuyau cible
+        # cible
         pipe_ind = 0
         if len(pipes) > 1 and all(b.x > pipes[0].x + pipes[0].width for b in birds):
             pipe_ind = 1
         target = pipes[pipe_ind]
 
-        # Déplacements + décisions
         dead_idx = set()
         for i in range(len(birds)):
             b = birds[i]
             b.move()
-            ge[i].fitness += 0.05  # survivre
+            ge[i].fitness += 0.05
 
-            # Features (10)
             dx  = (target.x + target.width/2) - b.x
             dy  = (target.gap_center - b.y)
-            ttc = dx / max(1.0, PIPE_VEL) / 60.0  # ~secondes
+            ttc = dx / max(1.0, PIPE_VEL) / FPS
             if len(pipes) > pipe_ind + 1:
                 nxt = pipes[pipe_ind + 1]
                 dx2 = (nxt.x + nxt.width/2) - b.x
@@ -368,35 +423,35 @@ def eval_genomes(genomes, config):
                 dx2 = WIDTH; dy2 = 0.0
 
             inputs = (
-                b.y / HEIGHT,                                # 1
-                max(-15.0, min(15.0, b.vel)) / 15.0,         # 2
-                clamp01(dx / WIDTH),                          # 3
-                dy / HEIGHT,                                  # 4
-                clamp01(ttc),                                  # 5
-                target.gap_size / HEIGHT,                     # 6
-                target.top / HEIGHT,                          # 7
-                target.bottom / HEIGHT,                       # 8
-                clamp01(dx2 / WIDTH),                         # 9
-                dy2 / HEIGHT,                                 # 10
+                b.y / HEIGHT,
+                max(-15.0, min(15.0, b.vel)) / 15.0,
+                clamp01(dx / WIDTH),
+                dy / HEIGHT,
+                clamp01(ttc),
+                target.gap_size / HEIGHT,
+                target.top / HEIGHT,
+                target.bottom / HEIGHT,
+                clamp01(dx2 / WIDTH),
+                dy2 / HEIGHT,
             )
-
-            out = nets[i].activate(inputs)
-            if out[0] > 0.5:
+            if nets[i].activate(inputs)[0] > 0.5:
                 b.jump()
-                ge[i].fitness -= 0.002  # éviter le spam de flaps
+                ge[i].fitness -= 0.002
 
-            # bonus de centrage vers le gap
             err = abs(dy) / max(1.0, (target.gap_size / 2.0))
             ge[i].fitness += max(0.0, 0.05 * (1.0 - min(1.0, err)))
 
-        # Tuyaux / collisions
-        add_pipe = False
+        # Pipes : collisions + score
+        add_point = False
         rem_pipes = []
 
         for p in pipes:
             for i, b in enumerate(birds):
                 if p.x < b.x + b.radius < p.x + p.width:
                     if b.y - b.radius < p.top or b.y + b.radius > p.bottom:
+                        if i not in dead_idx:
+                            try: SND_HIT.play(); SND_DIE.play()
+                            except: pass
                         ge[i].fitness -= 1.0
                         dead_idx.add(i)
                 if b.y + b.radius >= FLOOR_Y or b.y - b.radius <= 0:
@@ -408,40 +463,41 @@ def eval_genomes(genomes, config):
 
             if not p.passed and any(b.x > p.x + p.width for b in birds):
                 p.passed = True
-                add_pipe = True
+                add_point = True
 
             p.move()
             if p.x + p.width < 0:
                 rem_pipes.append(p)
 
-        if add_pipe:
+        if add_point:
             score += 1
+            SESSION_AUTO_BEST_SCORE = max(SESSION_AUTO_BEST_SCORE, score)
             try: SND_POINT.play()
             except: pass
             for g in ge: g.fitness += 5.0
-            # curriculum
-            if score % 5 == 0:
-                PIPE_GAP = max(140, PIPE_GAP - 10)
-            if score % 10 == 0:
-                PIPE_VEL = min(9, PIPE_VEL + 0.2)
-            last_x = max(pipes[-1].x, WIDTH + 50)
-            pipes.append(Pipe(new_pipe_x(last_x), random_gap_center(), PIPE_GAP, color=pipe_c, rim=rim_c))
 
         for r in rem_pipes:
-            if r in pipes: pipes.remove(r)
+            if r in pipes:
+                pipes.remove(r)
 
         if dead_idx:
             for idx in sorted(dead_idx, reverse=True):
                 birds.pop(idx); nets.pop(idx); ge.pop(idx)
+
+        # Spawn régulier (cadencé)
+        while spawn_acc >= TIME_BETWEEN_PIPES:
+            spawn_pipe(pipes, pipe_c, rim_c)
+            spawn_acc -= TIME_BETWEEN_PIPES
 
         base.move()
         draw_window(WIN, birds, pipes, base, score, gen, len(birds), SKIN_IDX)
 
 # ============== Entraînement infini + checkpoints ==============
 def train_ai(config_path, skin_idx=0, save_winner=True, ckpt_every=10):
-    global SKIN_IDX, STOP_TRAINING
+    global SKIN_IDX, STOP_TRAINING, SESSION_AUTO_BEST_SCORE
     SKIN_IDX = skin_idx
     STOP_TRAINING = False
+    SESSION_AUTO_BEST_SCORE = 0
 
     config = neat.config.Config(neat.DefaultGenome, neat.DefaultReproduction,
                                 neat.DefaultSpeciesSet, neat.DefaultStagnation,
@@ -454,49 +510,23 @@ def train_ai(config_path, skin_idx=0, save_winner=True, ckpt_every=10):
     p.add_reporter(UISyncReporter())
     p.add_reporter(neat.Checkpointer(generation_interval=ckpt_every, filename_prefix="neat-checkpoint-"))
 
-    best_ever = None
     best_fit = float("-inf")
-    session_best_auto = 0  # meilleur score (tuyaux) sur l'ensemble de CETTE session d'entraînement
 
     while not STOP_TRAINING:
-        # lance 1 génération
         p.run(eval_genomes, 1)
         if STOP_TRAINING:
             break
 
-        # récupère métriques pour le print + meilleur fitness pour winner.pkl
         pop_vals = [g for g in p.population.values() if g.fitness is not None]
         if pop_vals:
             current_best = max(pop_vals, key=lambda g: g.fitness)
             if current_best.fitness > best_fit:
                 best_fit = current_best.fitness
-                best_ever = current_best
                 if save_winner:
                     with open("winner.pkl", "wb") as f:
-                        pickle.dump(best_ever, f)
+                        pickle.dump(current_best, f)
 
-        # Estimer le meilleur score de tuyaux sur la génération via stats reporter (approx) :
-        # on ne le stockait pas; on peut l'approcher par fitness/5 si gap stable, mais mieux:
-        # On lit le meilleur "score" affiché: on l’a dans la fenêtre (pas accessible ici).
-        # Solution simple: écouter SND_POINT ne donne pas le score…
-        # => On prend la meilleure fitness relative comme proxy (optionnel). Ici on s’abstient.
-
-        # Petite pause visuelle si tu veux (sinon enlève)
-        # pygame.time.delay(5)
-
-        # Astuce: si tu veux calculer un "score" exact par génération, stocke une variable globale
-        # mise à jour dans eval_genomes quand add_pipe -> score += 1. Ici, on s’en tient à l’objectif
-        # de session (voir ci-dessous).
-
-        # On n'a pas de score cumul par gen; la session "auto" n'a pas de score unique
-        # => On estime un "meilleur score de session" en accumulant le meilleur score vu à l'écran
-        # c'est compliqué sans partage; on te propose de mettre ESC pour finir la session quand tu veux.
-
-        # Rien ici : session_best_auto sera 0 si tu n'appuies pas ESC en plein run,
-        # mais on préfère enregistrer "0" que de te donner un faux chiffre.
-
-    # Fin session auto => enregistrer score (ici 0 par défaut, ou tu peux mapper depuis eval_genomes si tu veux)
-    record_session("auto", session_best_auto)
+    record_session("auto", SESSION_AUTO_BEST_SCORE)
 
 # ============== Champion (replay) ==============
 def watch_champion(config_path, winner_path="winner.pkl", skin_idx=0):
@@ -514,15 +544,18 @@ def watch_champion(config_path, winner_path="winner.pkl", skin_idx=0):
     net = make_net(winner, config)
 
     bg, pipe_c, rim_c, bird_c, ui = SKINS[SKIN_IDX]
-    base = Base(FLOOR_Y)
-    bird = Bird(120, HEIGHT//2, color=bird_c)
-    pipes = [Pipe(350, random_gap_center(), PIPE_GAP, color=pipe_c, rim=rim_c)]
+    base  = Base(FLOOR_Y)
+    bird  = Bird(120, HEIGHT//2, color=bird_c)
+    pipes = prime_pipes(pipe_c, rim_c, count=3)
     score = 0
 
     clock = pygame.time.Clock()
+    spawn_acc = 0.0
     run = True
     while run:
-        clock.tick(60)
+        dt = clock.tick(FPS) / 1000.0
+        spawn_acc += dt
+
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit(); sys.exit()
@@ -537,7 +570,7 @@ def watch_champion(config_path, winner_path="winner.pkl", skin_idx=0):
         bird.move()
         dx  = (target.x + target.width/2) - bird.x
         dy  = (target.gap_center - bird.y)
-        ttc = dx / max(1.0, PIPE_VEL) / 60.0
+        ttc = dx / max(1.0, PIPE_VEL) / FPS
         if len(pipes) > pipe_ind + 1:
             nxt = pipes[pipe_ind + 1]
             dx2 = (nxt.x + nxt.width/2) - bird.x
@@ -560,22 +593,28 @@ def watch_champion(config_path, winner_path="winner.pkl", skin_idx=0):
         if net.activate(inputs)[0] > 0.5:
             bird.jump()
 
-        add_pipe = False
+        add_point = False
         rem = []
         for p in pipes:
             if p.x < bird.x + bird.radius < p.x + p.width:
                 if bird.y - bird.radius < p.top or bird.y + bird.radius > p.bottom:
                     run = False
             if not p.passed and bird.x > p.x + p.width:
-                p.passed = True; add_pipe = True
+                p.passed = True; add_point = True
             p.move()
             if p.x + p.width < 0: rem.append(p)
-        if add_pipe:
+
+        if add_point:
             score += 1
-            last_x = max(pipes[-1].x, WIDTH + 50)
-            pipes.append(Pipe(new_pipe_x(last_x), random_gap_center(), PIPE_GAP, color=pipe_c, rim=rim_c))
+            try: SND_POINT.play()
+            except: pass
+
         for r in rem:
             if r in pipes: pipes.remove(r)
+
+        while spawn_acc >= TIME_BETWEEN_PIPES:
+            spawn_pipe(pipes, pipe_c, rim_c)
+            spawn_acc -= TIME_BETWEEN_PIPES
 
         base.move()
         draw_window(WIN, [bird], pipes, base, score, gen, 1, SKIN_IDX)
@@ -586,14 +625,18 @@ def play_manual(skin_idx=0):
     SKIN_IDX = skin_idx
     bg, pipe_c, rim_c, bird_c, ui = SKINS[SKIN_IDX]
 
-    base = Base(FLOOR_Y)
-    bird = Bird(120, HEIGHT//2, color=bird_c)
-    pipes = [Pipe(350, random_gap_center(), PIPE_GAP, color=pipe_c, rim=rim_c)]
+    base  = Base(FLOOR_Y)
+    bird  = Bird(120, HEIGHT//2, color=bird_c)
+    pipes = prime_pipes(pipe_c, rim_c, count=3)
     score = 0
+
     clock = pygame.time.Clock()
+    spawn_acc = 0.0
     run = True
     while run:
-        clock.tick(60)
+        dt = clock.tick(FPS) / 1000.0
+        spawn_acc += dt
+
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit(); sys.exit()
@@ -602,33 +645,40 @@ def play_manual(skin_idx=0):
                 if event.key == pygame.K_ESCAPE: run = False
 
         bird.move()
-        add_pipe = False
+        add_point = False
         rem = []
+
         for p in pipes:
             if p.x < bird.x + bird.radius < p.x + p.width:
                 if bird.y - bird.radius < p.top or bird.y + bird.radius > p.bottom:
-                    # mort
                     try: SND_HIT.play(); SND_DIE.play()
                     except: pass
                     run = False
             if not p.passed and bird.x > p.x + p.width:
-                p.passed = True; add_pipe = True
+                p.passed = True; add_point = True
             p.move()
             if p.x + p.width < 0: rem.append(p)
 
-        if add_pipe:
+        if bird.y + bird.radius >= FLOOR_Y or bird.y - bird.radius <= 0:
+            try: SND_HIT.play(); SND_DIE.play()
+            except: pass
+            run = False
+
+        if add_point:
             score += 1
             try: SND_POINT.play()
             except: pass
-            last_x = max(pipes[-1].x, WIDTH + 50)
-            pipes.append(Pipe(new_pipe_x(last_x), random_gap_center(), PIPE_GAP, color=pipe_c, rim=rim_c))
+
         for r in rem:
             if r in pipes: pipes.remove(r)
+
+        while spawn_acc >= TIME_BETWEEN_PIPES:
+            spawn_pipe(pipes, pipe_c, rim_c)
+            spawn_acc -= TIME_BETWEEN_PIPES
 
         base.move()
         draw_window(WIN, [bird], pipes, base, score, gen, 1, SKIN_IDX)
 
-    # fin de la session manuelle => enregistrer et potentiellement afficher le graphe des 10 dernières
     record_session("manual", score)
 
 # ============== Config NEAT (toujours écrite) ==============
@@ -652,11 +702,9 @@ num_inputs                 = 10
 num_outputs                = 1
 num_hidden                 = 0
 
-# True = feed-forward, False = récurrent autorisé
 feed_forward               = True
 initial_connection         = full_direct
 
-# bias
 bias_init_mean             = 0.0
 bias_init_stdev            = 1.0
 bias_max_value             = 30.0
@@ -665,7 +713,6 @@ bias_mutate_power          = 0.6
 bias_mutate_rate           = 0.7
 bias_replace_rate          = 0.1
 
-# response (compat neat-python variantes)
 response_init_mean         = 0.0
 response_init_stdev        = 1.0
 response_max_value         = 30.0
@@ -674,7 +721,6 @@ response_mutate_power      = 0.5
 response_mutate_rate       = 0.7
 response_replace_rate      = 0.1
 
-# weights
 weight_init_mean           = 0.0
 weight_init_stdev          = 1.0
 weight_max_value           = 30.0
@@ -707,7 +753,6 @@ survival_threshold         = 0.25
 """
 
 def write_neat_config_always(path: str):
-    # On écrase toujours pour éviter des configs divergentes
     with open(path, "w", encoding="utf-8") as f:
         f.write(DEFAULT_NEAT_CONFIG)
 
@@ -716,12 +761,12 @@ def main():
     play_menu_music()
     local_dir = os.path.dirname(__file__) if '__file__' in globals() else os.getcwd()
     config_path = os.path.join(local_dir, "config-feedforward.txt")
-    write_neat_config_always(config_path)  # on force une config propre à chaque run
+    write_neat_config_always(config_path)
 
     clock = pygame.time.Clock()
     skin = 0
     while True:
-        clock.tick(60)
+        clock.tick(FPS)
         draw_menu(WIN, skin)
         for event in pygame.event.get():
             if event.type == pygame.QUIT:

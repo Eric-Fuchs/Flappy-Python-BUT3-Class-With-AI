@@ -18,11 +18,9 @@ num_inputs                 = 10
 num_outputs                = 1
 num_hidden                 = 0
 
-# True = feed-forward, False = récurrent autorisé
 feed_forward               = True
 initial_connection         = full_direct
 
-# bias
 bias_init_mean             = 0.0
 bias_init_stdev            = 1.0
 bias_max_value             = 30.0
@@ -31,7 +29,6 @@ bias_mutate_power          = 0.6
 bias_mutate_rate           = 0.7
 bias_replace_rate          = 0.1
 
-# response (compat neat-python variantes)
 response_init_mean         = 0.0
 response_init_stdev        = 1.0
 response_max_value         = 30.0
@@ -40,7 +37,6 @@ response_mutate_power      = 0.5
 response_mutate_rate       = 0.7
 response_replace_rate      = 0.1
 
-# weights
 weight_init_mean           = 0.0
 weight_init_stdev          = 1.0
 weight_max_value           = 30.0
