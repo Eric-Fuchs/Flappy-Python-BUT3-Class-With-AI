@@ -69,7 +69,7 @@ def play_menu_music():
 GRAVITY       = 0.5
 JUMP_VELOCITY = -8.5
 PIPE_GAP      = 200
-PIPE_DISTANCE = 300
+PIPE_DISTANCE = 1
 PIPE_VEL      = 5
 
 # Entraînement / affichage
