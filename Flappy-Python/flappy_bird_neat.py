@@ -478,7 +478,8 @@ def eval_genomes(genomes, config):
                 if event.key == pygame.K_g: handle_graph_request()
                 if event.key == pygame.K_s: SKIN_IDX = (SKIN_IDX + 1) % len(SKINS)
                 if event.key == pygame.K_b: cycle_background(+1)
-                if event.key == pygame.K_ESCAPE: STOP_TRAINING = True
+                if event.key in (pygame.K_ESCAPE, pygame.K_r):
+                    STOP_TRAINING = True
 
         if len(birds) == 0: break
 
@@ -642,7 +643,8 @@ def watch_champion(config_path, winner_path="winner.pkl", skin_idx=0):
                 if event.key == pygame.K_g: handle_graph_request()
                 if event.key == pygame.K_s: SKIN_IDX = (SKIN_IDX + 1) % len(SKINS)
                 if event.key == pygame.K_b: cycle_background(+1)
-                if event.key == pygame.K_ESCAPE: run = False
+                if event.key in (pygame.K_ESCAPE, pygame.K_r):
+                    run = False
 
         pipe_ind = 0
         if len(pipes) > 1 and bird.x > pipes[0].x + pipes[0].width:
@@ -729,7 +731,8 @@ def play_manual(skin_idx=0):
                 if event.key == pygame.K_g:     handle_graph_request()
                 if event.key == pygame.K_s:     SKIN_IDX = (SKIN_IDX + 1) % len(SKINS)
                 if event.key == pygame.K_b:     cycle_background(+1)
-                if event.key == pygame.K_ESCAPE: run = False
+                if event.key in (pygame.K_ESCAPE, pygame.K_r):
+                    run = False
 
         bird.move()
         add_point = False
